@@ -6,10 +6,12 @@ var config = new (require('v-conf'))();
 var NanoTimer = require('nanotimer');
 const http = require('https');
 
-var rpApiBaseUrl = 'https://api.radioparadise.com/api/get_block?bitrate=4&info=true';
+var rpApiBaseUrl;
 var nextEventApiUrl;
 var streamUrl;
 var songsOfNextEvent;
+var channelMix;
+var audioFormat;
 
 module.exports = ControllerRadioParadise;
 
@@ -53,6 +55,9 @@ ControllerRadioParadise.prototype.onStart = function () {
 };
 
 ControllerRadioParadise.prototype.onStop = function () {
+    var self = this;
+
+    self.removeFromBrowseSources();
     return libQ.resolve();
 };
 
@@ -120,6 +125,13 @@ ControllerRadioParadise.prototype.addToBrowseSources = function () {
     });
 };
 
+ControllerRadioParadise.prototype.removeFromBrowseSources = function () {
+    // Use this function to add your music service plugin to music sources
+    var self = this;
+
+    self.commandRouter.volumioRemoveToBrowseSources(self.getRadioI18nString('PLUGIN_NAME'));
+};
+
 ControllerRadioParadise.prototype.handleBrowseUri = function (curUri) {
     var self = this;
     var response;
@@ -167,7 +179,7 @@ ControllerRadioParadise.prototype.clearAddPlayTrack = function (track) {
         self.timer.clear();
     }
 
-    if (!track.uri.includes("apps.radioparadise.com")) {
+    if (!track.uri.includes("api.radioparadise.com")) {
         // normal radio streams
         return self.mpdPlugin.sendMpdCommand('stop', [])
             .then(function () {
@@ -186,7 +198,25 @@ ControllerRadioParadise.prototype.clearAddPlayTrack = function (track) {
                 })
             });
     } else {
-        // FLAC stream
+        // Advanced stream via API
+        rpApiBaseUrl = track.uri;
+
+        if (track.uri.includes("chan=0")) {
+            channelMix = "Main";
+        } else if (track.uri.includes("chan=1")) {
+            channelMix = "Mellow";
+        }  else if (track.uri.includes("chan=2")) {
+            channelMix = "Rock";
+        } else if (track.uri.includes("chan=3")) {
+            channelMix = "Groovy";
+        }
+
+        if (track.uri.includes("bitrate=3")) {
+            audioFormat = "aac";
+        } else {
+            audioFormat = "flac";
+        }
+        
         var songs;
         return self.setSongs(rpApiBaseUrl)
             .then(function (result) {
@@ -310,7 +340,7 @@ ControllerRadioParadise.prototype.explodeUri = function (uri) {
                 response.push({
                     service: self.serviceName,
                     type: 'track',
-                    trackType: 'flac',
+                    trackType: audioFormat,
                     radioType: station,
                     albumart: '/albumart?sourceicon=music_service/radio_paradise/rp-cover-black.png',
                     uri: self.radioStations.rparadise[channel].url,
@@ -451,13 +481,13 @@ ControllerRadioParadise.prototype.pushSongState = function (song) {
         status: 'play',
         service: self.serviceName,
         type: 'track',
-        trackType: 'flac',
+        trackType: audioFormat,
         radioType: 'rparadise',
         albumart: song.albumart,
         uri: song.uri,
         name: song.name,
         title: song.title,
-        artist: 'Radio Paradise',
+        artist: 'Radio Paradise ' + channelMix,
         album: song.album,
         streaming: true,
         disableUiControls: true,
@@ -475,10 +505,10 @@ ControllerRadioParadise.prototype.pushSongState = function (song) {
     var queueItem = self.commandRouter.stateMachine.playQueue.arrayQueue[vState.position];
 
     queueItem.name = song.name;
-    queueItem.artist = 'Radio Paradise';
+    queueItem.artist = 'Radio Paradise ' + channelMix;
     queueItem.album = song.album;
     queueItem.albumart = song.albumart;
-    queueItem.trackType = 'flac';
+    queueItem.trackType = audioFormat;
     queueItem.duration = Math.ceil(song.duration / 1000);
     queueItem.samplerate = '44.1 KHz';
     queueItem.bitdepth = '16 bit';
@@ -507,7 +537,7 @@ ControllerRadioParadise.prototype.setSongs = function (rpUri) {
                 self.errorToast('web', 'INCORRECT_RESPONSE');
             }
             // the stream event url to play
-            streamUrl = result.url + '?src=alexa';
+            streamUrl = result.url;
 
             // transform the songs into an array
             var songsArray = Object.keys(result.song).map(function (k) { return result.song[k] });
@@ -531,6 +561,7 @@ ControllerRadioParadise.prototype.setSongs = function (rpUri) {
             if (startsWithOffset) {
                 if(endsWithOffset) {
                     // get total time of event without initial spoken part and calculate both start and end offset
+                    self.logger.info('[' + Date.now() + '] ' + '[RadioParadise] rp API base url ' + rpApiBaseUrl);
                     return self.getStream(rpApiBaseUrl + '&event=' + result.event)
                     .then(function (eventResult) {
                         if (eventResult !== null) {
@@ -558,9 +589,6 @@ ControllerRadioParadise.prototype.setSongs = function (rpUri) {
 ControllerRadioParadise.prototype.getSongsResponse = function (songsArray, streamUrl, lengthOfEvent, endEvent, firstSongOffset, lastSongOffset) {
     var self = this;
     var response = [];
-    if(streamUrl.match('^https://')) {
-    	streamUrl = streamUrl.replace("https://","http://")
-	}
     for (var i = 0; i < songsArray.length; i++) {
         var song = songsArray[i];
         var duration = song.duration;
@@ -579,9 +607,9 @@ ControllerRadioParadise.prototype.getSongsResponse = function (songsArray, strea
         response.push({
             service: self.serviceName,
             type: 'track',
-            trackType: 'flac',
+            trackType: audioFormat,
             radioType: 'web',
-            albumart: 'http://img.radioparadise.com/' + song.cover,
+            albumart: 'https://img.radioparadise.com/' + song.cover,
             uri: streamUrl,
             name: song.artist + ' - ' + song.title,
             title: song.title,
@@ -597,6 +625,7 @@ ControllerRadioParadise.prototype.getSongsResponse = function (songsArray, strea
         });
     };
     // the url needed to retrieve the next stream event
+    self.logger.info('[' + Date.now() + '] ' + '[RadioParadise] RP API base url: ' + rpApiBaseUrl);
     nextEventApiUrl = rpApiBaseUrl + '&event=' + endEvent;
     return response;
 };
@@ -604,7 +633,7 @@ ControllerRadioParadise.prototype.getSongsResponse = function (songsArray, strea
 ControllerRadioParadise.prototype.playNextTrack = function (songIndex, songsArray) {
     var self = this;
     //if not the last track
-    if ((songIndex == 0 && songsArray.length == 1) || (songIndex < songsArray.length)) {
+    if ((songIndex == 0 && songsArray && songsArray.length == 1) || (songsArray && (songIndex < songsArray.length))) {
         self.logger.info('[' + Date.now() + '] ' + '[RadioParadise] Pushing the next song state: ' + songsArray[songIndex].name);
         return libQ.resolve(self.pushSongState(songsArray[songIndex]))
         .then(function () {
@@ -618,7 +647,21 @@ ControllerRadioParadise.prototype.playNextTrack = function (songIndex, songsArra
                 self.setSongs(nextEventApiUrl)
                 .then(function (result) {
                     songsOfNextEvent = result;
-                    return self.mpdPlugin.sendMpdCommand('add "' + songsOfNextEvent[0].uri + '"', []);
+                    if(result.length == 1) {
+                        self.logger.info('[' + Date.now() + '] ' + '[RadioParadise] received ONLY ONE event with id ' + result.event + '. Checking if it is a commercial.');
+                        if(result[0].artist === 'Commercial-free') {
+                            //Skip song
+                            self.logger.info('[' + Date.now() + '] ' + '[RadioParadise] FOUND RADIO-PARADISE commercial event. Skipping this commercial.');
+                            self.logger.info('[' + Date.now() + '] ' + '[RadioParadise] Prefetching next event.');
+                            self.setSongs(nextEventApiUrl)
+                            .then(function (result) {
+                                songsOfNextEvent = result;
+                                return self.mpdPlugin.sendMpdCommand('add "' + songsOfNextEvent[0].uri + '"', []);
+                            });
+                        }
+                    } else {
+                        return self.mpdPlugin.sendMpdCommand('add "' + songsOfNextEvent[0].uri + '"', []);
+                    }
                 });
             }
         });
